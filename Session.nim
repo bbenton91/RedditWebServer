@@ -1,7 +1,7 @@
 import tables, RedditApi/Reddit, random
 
 type 
-    UserSession = ref object
+    UserSession* = ref object
         user*: User
 
     Session = ref object
