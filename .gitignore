@@ -1,3 +1,8 @@
 *.exe
 /RedditApi
 /nim-templates-master
+/nimcache
+/testresults
+outputgotten.txt
+megatest.nim
+debug.log
