@@ -1,8 +1,9 @@
-import tables, RedditApi/Reddit, random
+import tables, RedditApi/src/Reddit, random
 
 type 
     UserSession* = ref object
         user*: User
+        nextAfter*: string
 
     Session = ref object
         sessionTable: TableRef[string, UserSession]
@@ -10,8 +11,8 @@ type
 proc newSession*():Session =
     Session(sessionTable: newTable[string, UserSession]())
 
-proc newUserSession*(user:User):UserSession =
-    UserSession(user:user)
+proc newUserSession*(user:User, nextAfter:string = ""):UserSession =
+    UserSession(user:user, nextAfter:nextAfter)
 
 method getNewSessionId(this:Session, length:int):string {.base.} =
     # @ through Z is 64-90
