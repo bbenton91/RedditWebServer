@@ -3,7 +3,7 @@ import ../RedditApi/src/Reddit
 
 let testProc = proc():ResultObj {.closure.} = newErrorResult(newInvalidUser("Testing"), "just testing")
 
-let userQueue = newUserQueue()
+let userQueue = newQueueTable()
 
 # ! This is a temp solution until I learn to work in nim...
 # Can't easily pass closures I guess
@@ -15,7 +15,6 @@ let popped = userQueue.popNextAction("Tom")
 if popped.isSome():
     popped.get.fun()
     assert value.kind == ErrorResult
-
 
 let emptyPop = userQueue.popNextAction("Tom")
 assert emptyPop.isNone
