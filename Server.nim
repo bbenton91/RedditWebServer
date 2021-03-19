@@ -1,10 +1,6 @@
-import asynchttpserver, asyncdispatch, nim-templates-master/templates, json, tables
+import asynchttpserver, asyncdispatch, nim-templates-master/templates, json, tables, sugar, os, options, sequtils
 import RedditApi/src/Reddit, Session
-
-let session = newSession()
-var server = newAsyncHttpServer()
-
-proc testPage (name: string, results: seq[JsonNode]): string = tmplf "test.html"
+import UserQueue, ThreadHandler
 
 # echo testPage("Charlie")
 
@@ -15,6 +11,9 @@ proc headers():HttpHeaders =
         "Access-Control-Allow-Methods": "POST,GET",
         "Content-Type":"application/json"
     })
+
+
+
 
 proc getChunkedContent*(user:User, isNew:bool, after:string, listingType:ListingType): Future[(string, seq[JsonNode], User)] {.async.} =
     ## Gets partial saved content. `user` is the User to pull content from, `isNew` is to signal if this is a brand-new request,
@@ -37,9 +36,9 @@ proc getChunkedContent*(user:User, isNew:bool, after:string, listingType:Listing
         
         # We get the next 'after' string to return. If it exists, we return it. Otherwise, return an empty string
         let nextAfter = if data.data.hasKey("data") and data.data["data"].hasKey("after"): data.data["data"]["after"].getStr() else: ""
-        result = (nextAfter, data.resultData, data.updatedUser)
+        result = if data.kind == ResultKind.DataResult: (nextAfter, data.resultData, data.updatedUser) else: (nextAfter, newSeq[JsonNode](), data.updatedUser)
 
-proc fetchAndReturnSavedListingsChunked(req:Request, userSession:UserSession, listingType:ListingType, isNew:bool, oldSessionId:string, newSessionId:string) {.async.} =
+proc fetchAndReturnSavedListingsChunked(req:Request, userSession:UserSession, listingType:ListingType, isNew:bool, oldSessionId:string, newSessionId:string, session: Session) {.async.} =
     let after = if isNew: "" else: userSession.nextAfter # get the 'after' string
 
     echo "after is " & after
@@ -71,7 +70,7 @@ proc fetchAndReturnSavedListingsChunked(req:Request, userSession:UserSession, li
     await req.respond(Http200, $ returnData, headers)
     
 
-proc fetchAndReturnSavedListings(req:Request, user:User, webToken:string, newSessionId:string, oldSessionId:string) {.async.} =
+proc fetchAndReturnSavedListings(req:Request, user:User, webToken:string, newSessionId:string, oldSessionId:string, session:Session) {.async.} =
     # If the user is valid, try to get the saved posts. Otherwise, return default data
     let linkData = if user.kind == ValidUser:
                                 await user.getAllSaved(fields = @["title", "url", "permalink", "id", "is_self", "subreddit", "author"])
@@ -95,7 +94,7 @@ proc fetchAndReturnSavedListings(req:Request, user:User, webToken:string, newSes
     session.setUserSession(newSessionId, oldSessionId, "", "", newUserSession(commentData.updatedUser))
 
 
-proc unsaveListing(req:Request, user:User, webToken:string, newSessionId:string, oldSessionId:string) {.async.} =
+proc unsaveListing(req:Request, user:User, webToken:string, newSessionId:string, oldSessionId:string, session:Session) {.async, gcsafe.} =
     let postData = parseJson(req.body)
     let fullname = postData["fullname"].getStr("")
 
@@ -114,7 +113,7 @@ proc unsaveListing(req:Request, user:User, webToken:string, newSessionId:string,
 
     session.setUserSession(newSessionId, oldSessionId, "", "", newUserSession(newUser))
 
-proc getAndValidateUserSession(oldSessionId:string, webToken:string): Future[(UserSession, string)] {.async.} =
+proc getAndValidateUserSession(oldSessionId:string, webToken:string, session:Session): Future[(UserSession, string)] {.async.} =
     ## Attempts to get a valid user from the session. If not able, an Invalid user is returned. A new session ID is also returned
     ## for access to the session.
 
@@ -135,7 +134,7 @@ proc getAndValidateUserSession(oldSessionId:string, webToken:string): Future[(Us
         session.setUserSession(newSessionId, oldSessionId, "", "", newUserSession(user))
         result = (userSession, newSessionId)
 
-proc cb(req: Request) {.async, gcsafe.} =
+proc cb(req: Request, session:Session) {.async, gcsafe.} =
     if req.reqMethod == HttpMethod.HttpPost:
         echo "got a post"
         # echo req.body
@@ -152,22 +151,14 @@ proc cb(req: Request) {.async, gcsafe.} =
         # Grab our session
 
          # Then we can either make a new user or grab one for the session
-        let (userSession, newSessionId) = await getAndValidateUserSession(sessionId, webToken)
+        let (userSession, newSessionId) = await getAndValidateUserSession(sessionId, webToken, session)
         
         if req.url.path == "/get-saved":
-            await fetchAndReturnSavedListingsChunked(req, userSession, listingType, isNew, sessionId, newSessionId)
+            await fetchAndReturnSavedListingsChunked(req, userSession, listingType, isNew, sessionId, newSessionId, session)
             # await fetchAndReturnSavedListings(req, userSession.user, webToken, newSessionId, sessionId)
         elif req.url.path == "/unsave":
-            await unsaveListing(req, userSession.user, webToken, newSessionId, sessionId)
+            await unsaveListing(req, userSession.user, webToken, newSessionId, sessionId, session)
 
-    elif req.url.path == "/list" and req.reqMethod == HttpMethod.HttpPost:
-        # var user = connectPassword("aI-ujHrrKdOsZg", "dNw2jGHX65ejS8JxkMDkKZtNKk8", "Pahaz", "Suchasandorwith12")
-
-        var user = connectPassword("y_LmR31bMjlTBQ", "Cnzt0PoMNEh2YztgC_JvQVg5En7oBA", "Pahaz", "Suchasandorwith12")
-        var data = await user.getSaved(fields = @["title"])
-        
-        echo "listing"
-        await req.respond(Http200, testPage("Paha", data.resultData))
     elif req.url.path == "/":
         echo "normal path"
         await req.respond(Http200, "Hello")
@@ -183,6 +174,12 @@ proc cb(req: Request) {.async, gcsafe.} =
         headers["Access-Control-Allow-Methods"] = "POST,GET"
         await req.respond(Http200, "", headers)
 
-# var queueTable:Table[string, UserQueue]
+# {.gcsafe.}:
 
-waitFor server.serve(Port(7070), cb)
+proc startServer():Future[void] {.async.} =
+    var server = newAsyncHttpServer()
+    let sessionObj  = newSession()
+    echo "Server starting"
+    await server.serve(Port(7070), proc(req:Request):Future[void]{.closure, gcsafe.} = cb(req, sessionObj))
+
+waitFor startServer()
