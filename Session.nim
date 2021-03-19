@@ -5,7 +5,7 @@ type
         user*: User
         nextAfter*: string
 
-    Session = ref object
+    Session* = ref object
         sessionTable: TableRef[string, UserSession]
 
 proc newSession*():Session =
