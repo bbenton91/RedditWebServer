@@ -1,20 +1,37 @@
-import ../UserQueue, sugar, options
+import ../UserQueue, sugar, options, asyncdispatch
 import ../RedditApi/src/Reddit
 
-let testProc = proc():ResultObj {.closure.} = newErrorResult(newInvalidUser("Testing"), "just testing")
+proc test() =
+    let testProc = proc():Future[ResultObj] {.closure, gcsafe, async.} = result = newErrorResult(newInvalidUser("Testing"), "just testing")
 
-let userQueue = newQueueTable()
+    let userQueue = newQueueTable()
 
-# ! This is a temp solution until I learn to work in nim...
-# Can't easily pass closures I guess
-var value:ResultObj
-let action = newAction(proc() = value = testProc())
-userQueue.pushAction("Tom", action)
+    # ! This is a temp solution until I learn to work in nim...
+    # Can't easily pass closures I guess
+    var value:ResultObj
+    let action = newAction(proc():Future[void] {.async, gcsafe.} = value = await testProc())
 
-let popped = userQueue.popNextAction("Tom")
-if popped.isSome():
-    popped.get.fun()
-    assert value.kind == ErrorResult
+    var user = userQueue["Tom"]
+    doAssert user.isNone
 
-let emptyPop = userQueue.popNextAction("Tom")
-assert emptyPop.isNone
+    userQueue.addNewUser("Tom")
+    user = userQueue["Tom"]
+
+    doAssert user.isSome
+
+    user.get.pushAction(action)
+
+    doAssert user.get.hasNextAction()
+
+    let popped = user.get.popNextAction()
+    if popped.isSome():
+        waitFor popped.get.fun()
+        doAssert value.kind == ErrorResult
+
+    let emptyPop = user.get.popNextAction()
+    doAssert emptyPop.isNone
+
+    doAssert userQueue.contains("Tom")
+    doAssert not userQueue.contains("Betty")
+
+test()
