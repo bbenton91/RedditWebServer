@@ -1,5 +1,4 @@
 import tables, sugar, options, heapqueue, asyncdispatch
-import ../RedditApi/src/Reddit
 
 type
     Action* = ref object
@@ -13,10 +12,10 @@ type
         queue: HeapQueue[Action]
         # table: TableRef[string, HeapQueue[Action]]
 
-proc newAction*(fun: proc():Future[void] {.gcsafe.}): Action =
+proc newAction*(fun: proc():Future[void] {.async, gcsafe.}): Action =
     Action(fun: fun)
 
-proc newQueueTable*():UserTable =
+proc newQueueTable*(): UserTable =
     UserTable(table: newTable[string, UserQueue]())
 
 proc newUserQueue(): UserQueue =
@@ -27,14 +26,23 @@ proc `[]`*(this: UserTable, name:string): Option[UserQueue] =
         return some(this.table[name])
     none(UserQueue)
 
+proc `[]`*(this: ref UserTable, name:string): Option[UserQueue] =
+    if this.table.contains(name):
+        return some(this.table[][name])
+    none(UserQueue)
+
 proc `[]=`*(this: UserTable, name:string, value:UserQueue) =
     this.table[name] = value
 
 method contains*(this:UserTable, name:string):bool {.base.} = 
     this.table.contains(name)
 
-iterator values*(this:UserTable):UserQueue =
+iterator values*(this:UserTable): UserQueue =
     for item in this.table.values:
+        yield item
+
+iterator keys*(this:UserTable): string =
+    for item in this.table.keys:
         yield item
 
 method addNewUser*(this:UserTable, name:string) {.base.} =
