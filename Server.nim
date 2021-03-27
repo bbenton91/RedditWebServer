@@ -1,8 +1,12 @@
-import asynchttpserver, asyncdispatch, nim-templates-master/templates, json, tables, sugar, os, options, sequtils
+import asynchttpserver, asyncdispatch, nim-templates-master/templates, json, sugar, options, tables
 import RedditApi/src/Reddit, Session
-import UserQueue, ThreadHandler
+import UserQueue
 
 # echo testPage("Charlie")
+
+type 
+    QueueContainer = object
+        userTable: ref UserTable
 
 proc headers():HttpHeaders = 
     newHttpHeaders({
@@ -11,8 +15,6 @@ proc headers():HttpHeaders =
         "Access-Control-Allow-Methods": "POST,GET",
         "Content-Type":"application/json"
     })
-
-
 
 
 proc getChunkedContent*(user:User, isNew:bool, after:string, listingType:ListingType): Future[(string, seq[JsonNode], User)] {.async.} =
@@ -41,15 +43,11 @@ proc getChunkedContent*(user:User, isNew:bool, after:string, listingType:Listing
 proc fetchAndReturnSavedListingsChunked(req:Request, userSession:UserSession, listingType:ListingType, isNew:bool, oldSessionId:string, newSessionId:string, session: Session) {.async.} =
     let after = if isNew: "" else: userSession.nextAfter # get the 'after' string
 
-    echo "after is " & after
-
     # Then fetch the data
     let (nextAfter, content, refreshedUser) = await getChunkedContent(userSession.user, isNew, after, listingType)
 
     # Then prepare to send back
     let headers = headers()
-
-    echo nextAfter
 
     var returnData:JsonNode
 
@@ -67,20 +65,25 @@ proc fetchAndReturnSavedListingsChunked(req:Request, userSession:UserSession, li
     session.setUserSession(newSessionId, oldSessionId, "", "", newUserSession(refreshedUser, nextAfter))
 
     # send
-    await req.respond(Http200, $ returnData, headers)
+    try:
+        await req.respond(Http200, $ returnData, headers)
+    except ValueError:
+        echo "Couldn't respond to request"
     
 
 proc fetchAndReturnSavedListings(req:Request, user:User, webToken:string, newSessionId:string, oldSessionId:string, session:Session) {.async.} =
     # If the user is valid, try to get the saved posts. Otherwise, return default data
-    let linkData = if user.kind == ValidUser:
-                                await user.getAllSaved(fields = @["title", "url", "permalink", "id", "is_self", "subreddit", "author"])
-                            else:
-                                newErrorResult(user)
+    let linkData = 
+        if user.kind == ValidUser:
+            await user.getAllSaved(fields = @["title", "url", "permalink", "id", "is_self", "subreddit", "author"])
+        else:
+            newErrorResult(user)
 
-    let commentData = if linkData.updatedUser.kind == ValidUser:
-                                await linkData.updatedUser.getAllSaved(fields = @["title", "url", "permalink", "id", "is_self", "subreddit", "author", "body"], listingType = Comment)
-                            else:
-                                newErrorResult(linkData.updatedUser)
+    let commentData = 
+        if linkData.updatedUser.kind == ValidUser:
+            await linkData.updatedUser.getAllSaved(fields = @["title", "url", "permalink", "id", "is_self", "subreddit", "author", "body"], listingType = Comment)
+        else:
+            newErrorResult(linkData.updatedUser)
 
     let headers = headers()
 
@@ -134,7 +137,14 @@ proc getAndValidateUserSession(oldSessionId:string, webToken:string, session:Ses
         session.setUserSession(newSessionId, oldSessionId, "", "", newUserSession(user))
         result = (userSession, newSessionId)
 
-proc cb(req: Request, session:Session) {.async, gcsafe.} =
+proc enqueueAction(queueTable: UserTable, userSession: UserSession, fun: proc():Future[void] {.async, gcsafe.}) {.inline.} =
+    if queueTable[userSession.user.username].isNone:
+        queueTable.addNewUser(userSession.user.username)
+        
+    let action = newAction(fun)
+    queueTable[userSession.user.username].get.pushAction(action)
+
+proc cb(req: Request, session:Session, queueTable: UserTable) {.async, gcsafe.} =
     if req.reqMethod == HttpMethod.HttpPost:
         echo "got a post"
         # echo req.body
@@ -153,10 +163,26 @@ proc cb(req: Request, session:Session) {.async, gcsafe.} =
          # Then we can either make a new user or grab one for the session
         let (userSession, newSessionId) = await getAndValidateUserSession(sessionId, webToken, session)
         
+        ##
+        ## This is our get-saved endpoint, where we return saved listings to the user
+        ##
         if req.url.path == "/get-saved":
+            # if userSession.user.kind == ValidUser:
+            #     echo "Adding action"
+            #     enqueueAction(queueTable, userSession, proc():Future[void] {.async.} = await fetchAndReturnSavedListingsChunked(req, userSession, listingType, isNew, sessionId, newSessionId, session))
+            # else:
+            #     echo "not a valid user?"
             await fetchAndReturnSavedListingsChunked(req, userSession, listingType, isNew, sessionId, newSessionId, session)
             # await fetchAndReturnSavedListings(req, userSession.user, webToken, newSessionId, sessionId)
         elif req.url.path == "/unsave":
+            # if userSession.user.kind == ValidUser:
+            #     if queueTable[userSession.user.username].isNone:
+            #         queueTable.addNewUser(userSession.user.username)
+                
+            #     let action = newAction(proc:Future[void] {.async.} = await unsaveListing(req, userSession.user, webToken, newSessionId, sessionId, session))
+            #     queueTable[userSession.user.username].get.pushAction(action)
+            # else:
+            #     echo "not a valid user?"
             await unsaveListing(req, userSession.user, webToken, newSessionId, sessionId, session)
 
     elif req.url.path == "/":
@@ -176,10 +202,45 @@ proc cb(req: Request, session:Session) {.async, gcsafe.} =
 
 # {.gcsafe.}:
 
-proc startServer():Future[void] {.async.} =
+proc processQueue(queueTable:UserTable) {.async.} =
+    while true:
+        for queue in queueTable.values: 
+            # echo "Checking " & name
+            # If the queue is not busy but has something left to process
+            if not queue.isProcessing and queue.hasNextAction():
+                let action = queue.popNextAction()
+                if action.isSome:
+                    await action.get.fun()
+    
+        await sleepAsync(100)
+
+proc startServer(queueTable:UserTable) {.async.} =
+    # var worker1: Thread[UserTable]
+    # createThread(worker1, receiver)
+
+    proc cb2(req: Request) {.async.} =
+        let headers = {"Date": "Tue, 29 Apr 2014 23:40:08 GMT",
+        "Content-type": "text/plain; charset=utf-8"}
+        echo "test"
+        await req.respond(Http200, "Hello World", headers.newHttpHeaders())
+
     var server = newAsyncHttpServer()
     let sessionObj  = newSession()
     echo "Server starting"
-    await server.serve(Port(7070), proc(req:Request):Future[void]{.closure, gcsafe.} = cb(req, sessionObj))
 
-waitFor startServer()
+    server.listen Port(7070)
+    while true:
+        if server.shouldAcceptRequest():
+            let callback = proc(req:Request):Future[void] = cb(req, sessionObj, queueTable)
+            await server.acceptRequest(Port(7070), callback)
+        else:
+            poll()
+
+        # processQueue(queueTable)
+    # await server.serve(Port(7070), proc(req:Request):Future[void]{.closure, gcsafe.} = cb(req, sessionObj, queueTable))
+
+var queueTable = newQueueTable()
+
+asyncCheck startServer(queueTable)
+asyncCheck processQueue(queueTable)
+runForever()
