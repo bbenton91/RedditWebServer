@@ -1,17 +1,23 @@
-import ../UserQueue, sugar, options, asyncdispatch
-import ../RedditApi/src/Reddit
-import ../ThreadHandler
-import ../SharedChannel
+import options, asyncdispatch
+# from ../ThreadHandler import receiver, chan
 import ../UserQueue
+import ../Message
+
+var chan*: Channel[ChannelMessage]
+
+proc receiver*() {.thread.} =
+    echo "hey"
 
 proc test() =
     # var channel = newSharedChannel[Message]()
     # channel.open()
 
+    chan.open()
+
     var queueTable = newQueueTable()
 
     # let testProc = proc():Future[void] {.closure, async, gcsafe.} = discard newErrorResult(newInvalidUser("Testing"), "just testing")
-    let testProc = proc():Future[void] {.closure, async, gcsafe.} = echo "Hey there"
+    let testProc = proc(): Future[void] {.closure, async, gcsafe.} = echo "Hey there"
 
     let userQueue = newQueueTable()
 
@@ -21,9 +27,11 @@ proc test() =
     # var worker1: Thread[SharedChannel[Message]]
 
     # Start the thread with the queueTable
-    var worker1: Thread[UserTable]
-    createThread(worker1, receiver, queueTable)
+    var worker1: Thread[void]
+    createThread(worker1, receiver)
 
+    let message:ChannelMessage = newChannelMessage(action, "Tom")
+    chan.send(message)
     # let msg = Message(userName:"Tom", action: testProc)
 
     # Add a new user and push the action for the thread to handle
