@@ -34,6 +34,7 @@ proc getChunkedContent*(user:User, isNew:bool, after:string, listingType:Listing
         let data = if user.kind == ValidUser:
                                     await user.getSaved(fields = @["title", "url", "permalink", "id", "is_self", "subreddit", "author", "body"], extraParams=urlParams, listingType=listingType)
                                 else:
+                                    echo "We have a bad user here?"
                                     newErrorResult(user)
         
         # We get the next 'after' string to return. If it exists, we return it. Otherwise, return an empty string
@@ -120,16 +121,20 @@ proc getAndValidateUserSession(oldSessionId:string, webToken:string, session:Ses
     ## Attempts to get a valid user from the session. If not able, an Invalid user is returned. A new session ID is also returned
     ## for access to the session.
 
+    echo oldSessionId
     var (userSession, newSessionId) = session.getUserSession(oldSessionId, "")
 
-    if userSession == nil or userSession.user.kind == InvalidUser: # If the session is nil or our user is invalid, we need a new user
+    # If the session is nil or our user is invalid, we need a new user
+    if userSession == nil or userSession.user.kind == InvalidUser: 
         echo "session is nil or user kind is invalid. Nil? " & $(userSession == nil)
         # Connect using web auth
         var user = await Reddit.connectAuth("C6iDiQaoPTwgVw","m9Ze8qmjzHO7yuU9KyE3lCKoJQzdYQ", webToken, "http://localhost:3000")
         var userSession = newUserSession(user, "")
         session.setUserSession(newSessionId, oldSessionId, "", "", newUserSession(user))
         result = (userSession, newSessionId)
-    else: # Otherwise we got one right here
+    
+    # Otherwise we got one right here
+    else: 
         var user = userSession.user
         if user.tokens.isExpired():
             user = newInvalidUser("Session expired")
@@ -167,23 +172,23 @@ proc cb(req: Request, session:Session, queueTable: UserTable) {.async, gcsafe.} 
         ## This is our get-saved endpoint, where we return saved listings to the user
         ##
         if req.url.path == "/get-saved":
-            # if userSession.user.kind == ValidUser:
-            #     echo "Adding action"
-            #     enqueueAction(queueTable, userSession, proc():Future[void] {.async.} = await fetchAndReturnSavedListingsChunked(req, userSession, listingType, isNew, sessionId, newSessionId, session))
-            # else:
-            #     echo "not a valid user?"
-            await fetchAndReturnSavedListingsChunked(req, userSession, listingType, isNew, sessionId, newSessionId, session)
+            if userSession.user.kind == ValidUser:
+                # echo "Adding action"
+                enqueueAction(queueTable, userSession, proc():Future[void] {.async.} = await fetchAndReturnSavedListingsChunked(req, userSession, listingType, isNew, sessionId, newSessionId, session))
+            else:
+                echo "not a valid user?"
+                await fetchAndReturnSavedListingsChunked(req, userSession, listingType, isNew, sessionId, newSessionId, session)
             # await fetchAndReturnSavedListings(req, userSession.user, webToken, newSessionId, sessionId)
         elif req.url.path == "/unsave":
-            # if userSession.user.kind == ValidUser:
-            #     if queueTable[userSession.user.username].isNone:
-            #         queueTable.addNewUser(userSession.user.username)
+            if userSession.user.kind == ValidUser:
+                if queueTable[userSession.user.username].isNone:
+                    queueTable.addNewUser(userSession.user.username)
                 
-            #     let action = newAction(proc:Future[void] {.async.} = await unsaveListing(req, userSession.user, webToken, newSessionId, sessionId, session))
-            #     queueTable[userSession.user.username].get.pushAction(action)
-            # else:
-            #     echo "not a valid user?"
-            await unsaveListing(req, userSession.user, webToken, newSessionId, sessionId, session)
+                let action = newAction(proc:Future[void] {.async.} = await unsaveListing(req, userSession.user, webToken, newSessionId, sessionId, session))
+                queueTable[userSession.user.username].get.pushAction(action)
+            else:
+                echo "not a valid user?"
+            # await unsaveListing(req, userSession.user, webToken, newSessionId, sessionId, session)
 
     elif req.url.path == "/":
         echo "normal path"
