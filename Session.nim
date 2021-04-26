@@ -35,10 +35,11 @@ method validateSession(this:Session) {.base.} =
 method getUserSession*(this:Session, sessionId:string, sessionKey:string):(UserSession, string) {.base.} =
     # TODO need to validate here before getting
     #validate
-    ( this.sessionTable.getOrDefault(sessionId, nil), this.getNewSessionId(24) )
+    # ( this.sessionTable.getOrDefault(sessionId, nil), this.getNewSessionId(24) )
+    ( this.sessionTable.getOrDefault(sessionId, nil), if sessionId != "": sessionId else: this.getNewSessionId(24) )
 
 method setUserSession*(this:Session, sessionId:string, oldSessionId:string, newSessionKey:string, oldSessionKey:string, userSession: UserSession) {.base.} =
-    this.sessionTable[sessionId] = userSession
     this.sessionTable.del(oldSessionId)
+    this.sessionTable[sessionId] = userSession
     # TODO probably should validate here before setting
 
